@@ -26,9 +26,9 @@
 
 namespace qrcodegen {
 	
-	type bit = number;
+	type bit  = number;
 	type byte = number;
-	type int = number;
+	type int  = number;
 	
 	
 	/*---- QR Code symbol class ----*/
@@ -114,10 +114,10 @@ namespace qrcodegen {
 			}
 			
 			// Concatenate all segments to create the data bit string
-			let bb = new BitBuffer();
+			let bb: Array<bit> = []
 			for (const seg of segs) {
-				bb.appendBits(seg.mode.modeBits, 4);
-				bb.appendBits(seg.numChars, seg.mode.numCharCountBits(version));
+				appendBits(seg.mode.modeBits, 4, bb);
+				appendBits(seg.numChars, seg.mode.numCharCountBits(version), bb);
 				for (const b of seg.getData())
 					bb.push(b);
 			}
@@ -128,14 +128,14 @@ namespace qrcodegen {
 			const dataCapacityBits: int = QrCode.getNumDataCodewords(version, ecl) * 8;
 			if (bb.length > dataCapacityBits)
 				throw "Assertion error";
-			bb.appendBits(0, Math.min(4, dataCapacityBits - bb.length));
-			bb.appendBits(0, (8 - bb.length % 8) % 8);
+			appendBits(0, Math.min(4, dataCapacityBits - bb.length), bb);
+			appendBits(0, (8 - bb.length % 8) % 8, bb);
 			if (bb.length % 8 != 0)
 				throw "Assertion error";
 			
 			// Pad with alternating bytes until data capacity is reached
 			for (let padByte = 0xEC; bb.length < dataCapacityBits; padByte ^= 0xEC ^ 0x11)
-				bb.appendBits(padByte, 8);
+				appendBits(padByte, 8, bb);
 			
 			// Pack bits into bytes in big endian
 			let dataCodewords: Array<byte> = [];
@@ -422,11 +422,11 @@ namespace qrcodegen {
 			
 			// Split data into blocks and append ECC to each block
 			let blocks: Array<Array<byte>> = [];
-			const rs = new ReedSolomonGenerator(blockEccLen);
+			const rsDiv: Array<byte> = QrCode.reedSolomonComputeDivisor(blockEccLen);
 			for (let i = 0, k = 0; i < numBlocks; i++) {
 				let dat: Array<byte> = data.slice(k, k + shortBlockLen - blockEccLen + (i < numShortBlocks ? 0 : 1));
 				k += dat.length;
-				const ecc: Array<byte> = rs.getRemainder(dat);
+				const ecc: Array<byte> = QrCode.reedSolomonComputeRemainder(dat, rsDiv);
 				if (i < numShortBlocks)
 					dat.push(0);
 				blocks.push(dat.concat(ecc));
@@ -435,11 +435,11 @@ namespace qrcodegen {
 			// Interleave (not concatenate) the bytes from every block into a single sequence
 			let result: Array<byte> = [];
 			for (let i = 0; i < blocks[0].length; i++) {
-				for (let j = 0; j < blocks.length; j++) {
+				blocks.forEach((block, j) => {
 					// Skip the padding byte in short blocks
 					if (i != shortBlockLen - blockEccLen || j >= numShortBlocks)
-						result.push(blocks[j][i]);
-				}
+						result.push(block[i]);
+				});
 			}
 			if (result.length != rawCodewords)
 				throw "Assertion error";
@@ -512,55 +512,47 @@ namespace qrcodegen {
 			
 			// Adjacent modules in row having same color, and finder-like patterns
 			for (let y = 0; y < this.size; y++) {
-				let runHistory = [0,0,0,0,0,0,0];
-				let color = false;
+				let runColor = false;
 				let runX = 0;
+				let runHistory = [0,0,0,0,0,0,0];
 				for (let x = 0; x < this.size; x++) {
-					if (this.modules[y][x] == color) {
+					if (this.modules[y][x] == runColor) {
 						runX++;
 						if (runX == 5)
 							result += QrCode.PENALTY_N1;
 						else if (runX > 5)
 							result++;
 					} else {
-						QrCode.addRunToHistory(runX, runHistory);
-						if (!color && QrCode.hasFinderLikePattern(runHistory))
-							result += QrCode.PENALTY_N3;
-						color = this.modules[y][x];
+						this.finderPenaltyAddHistory(runX, runHistory);
+						if (!runColor)
+							result += this.finderPenaltyCountPatterns(runHistory) * QrCode.PENALTY_N3;
+						runColor = this.modules[y][x];
 						runX = 1;
 					}
 				}
-				QrCode.addRunToHistory(runX, runHistory);
-				if (color)
-					QrCode.addRunToHistory(0, runHistory);  // Dummy run of white
-				if (QrCode.hasFinderLikePattern(runHistory))
-					result += QrCode.PENALTY_N3;
+				result += this.finderPenaltyTerminateAndCount(runColor, runX, runHistory) * QrCode.PENALTY_N3;
 			}
 			// Adjacent modules in column having same color, and finder-like patterns
 			for (let x = 0; x < this.size; x++) {
-				let runHistory = [0,0,0,0,0,0,0];
-				let color = false;
+				let runColor = false;
 				let runY = 0;
+				let runHistory = [0,0,0,0,0,0,0];
 				for (let y = 0; y < this.size; y++) {
-					if (this.modules[y][x] == color) {
+					if (this.modules[y][x] == runColor) {
 						runY++;
 						if (runY == 5)
 							result += QrCode.PENALTY_N1;
 						else if (runY > 5)
 							result++;
 					} else {
-						QrCode.addRunToHistory(runY, runHistory);
-						if (!color && QrCode.hasFinderLikePattern(runHistory))
-							result += QrCode.PENALTY_N3;
-						color = this.modules[y][x];
+						this.finderPenaltyAddHistory(runY, runHistory);
+						if (!runColor)
+							result += this.finderPenaltyCountPatterns(runHistory) * QrCode.PENALTY_N3;
+						runColor = this.modules[y][x];
 						runY = 1;
 					}
 				}
-				QrCode.addRunToHistory(runY, runHistory);
-				if (color)
-					QrCode.addRunToHistory(0, runHistory);  // Dummy run of white
-				if (QrCode.hasFinderLikePattern(runHistory))
-					result += QrCode.PENALTY_N3;
+				result += this.finderPenaltyTerminateAndCount(runColor, runY, runHistory) * QrCode.PENALTY_N3;
 			}
 			
 			// 2*2 blocks of modules having same color
@@ -576,12 +568,8 @@ namespace qrcodegen {
 			
 			// Balance of black and white modules
 			let black: int = 0;
-			for (const row of this.modules) {
-				for (const color of row) {
-					if (color)
-						black++;
-				}
-			}
+			for (const row of this.modules)
+				black = row.reduce((sum, color) => sum + (color ? 1 : 0), black);
 			const total: int = this.size * this.size;  // Note that size is odd, so black/total != 1/2
 			// Compute the smallest integer k >= 0 such that (45-5k)% <= black/total <= (55+5k)%
 			const k: int = Math.ceil(Math.abs(black * 20 - total * 10) / total) - 1;
@@ -623,6 +611,8 @@ namespace qrcodegen {
 				if (ver >= 7)
 					result -= 36;
 			}
+			if (!(208 <= result && result <= 29648))
+				throw "Assertion error";
 			return result;
 		}
 		
@@ -637,21 +627,95 @@ namespace qrcodegen {
 		}
 		
 		
-		// Inserts the given value to the front of the given array, which shifts over the
-		// existing values and deletes the last value. A helper function for getPenaltyScore().
-		private static addRunToHistory(run: int, history: Array<int>): void {
-			history.pop();
-			history.unshift(run);
+		// Returns a Reed-Solomon ECC generator polynomial for the given degree. This could be
+		// implemented as a lookup table over all possible parameter values, instead of as an algorithm.
+		private static reedSolomonComputeDivisor(degree: int): Array<byte> {
+			if (degree < 1 || degree > 255)
+				throw "Degree out of range";
+			// Polynomial coefficients are stored from highest to lowest power, excluding the leading term which is always 1.
+			// For example the polynomial x^3 + 255x^2 + 8x + 93 is stored as the uint8 array [255, 8, 93].
+			let result: Array<byte> = [];
+			for (let i = 0; i < degree - 1; i++)
+				result.push(0);
+			result.push(1);  // Start off with the monomial x^0
+			
+			// Compute the product polynomial (x - r^0) * (x - r^1) * (x - r^2) * ... * (x - r^{degree-1}),
+			// and drop the highest monomial term which is always 1x^degree.
+			// Note that r = 0x02, which is a generator element of this field GF(2^8/0x11D).
+			let root = 1;
+			for (let i = 0; i < degree; i++) {
+				// Multiply the current product by (x - r^i)
+				for (let j = 0; j < result.length; j++) {
+					result[j] = QrCode.reedSolomonMultiply(result[j], root);
+					if (j + 1 < result.length)
+						result[j] ^= result[j + 1];
+				}
+				root = QrCode.reedSolomonMultiply(root, 0x02);
+			}
+			return result;
 		}
 		
 		
-		// Tests whether the given run history has the pattern of ratio 1:1:3:1:1 in the middle, and
-		// surrounded by at least 4 on either or both ends. A helper function for getPenaltyScore().
-		// Must only be called immediately after a run of white modules has ended.
-		private static hasFinderLikePattern(runHistory: Array<int>): boolean {
+		// Returns the Reed-Solomon error correction codeword for the given data and divisor polynomials.
+		private static reedSolomonComputeRemainder(data: Array<byte>, divisor: Array<byte>): Array<byte> {
+			let result: Array<byte> = divisor.map(_ => 0);
+			for (const b of data) {  // Polynomial division
+				const factor: byte = b ^ (result.shift() as byte);
+				result.push(0);
+				divisor.forEach((coef, i) =>
+					result[i] ^= QrCode.reedSolomonMultiply(coef, factor));
+			}
+			return result;
+		}
+		
+		
+		// Returns the product of the two given field elements modulo GF(2^8/0x11D). The arguments and result
+		// are unsigned 8-bit integers. This could be implemented as a lookup table of 256*256 entries of uint8.
+		private static reedSolomonMultiply(x: byte, y: byte): byte {
+			if (x >>> 8 != 0 || y >>> 8 != 0)
+				throw "Byte out of range";
+			// Russian peasant multiplication
+			let z: int = 0;
+			for (let i = 7; i >= 0; i--) {
+				z = (z << 1) ^ ((z >>> 7) * 0x11D);
+				z ^= ((y >>> i) & 1) * x;
+			}
+			if (z >>> 8 != 0)
+				throw "Assertion error";
+			return z as byte;
+		}
+		
+		
+		// Can only be called immediately after a white run is added, and
+		// returns either 0, 1, or 2. A helper function for getPenaltyScore().
+		private finderPenaltyCountPatterns(runHistory: Array<int>): int {
 			const n: int = runHistory[1];
-			return n > 0 && runHistory[2] == n && runHistory[4] == n && runHistory[5] == n
-				&& runHistory[3] == n * 3 && Math.max(runHistory[0], runHistory[6]) >= n * 4;
+			if (n > this.size * 3)
+				throw "Assertion error";
+			const core: boolean = n > 0 && runHistory[2] == n && runHistory[3] == n * 3 && runHistory[4] == n && runHistory[5] == n;
+			return (core && runHistory[0] >= n * 4 && runHistory[6] >= n ? 1 : 0)
+			     + (core && runHistory[6] >= n * 4 && runHistory[0] >= n ? 1 : 0);
+		}
+		
+		
+		// Must be called at the end of a line (row or column) of modules. A helper function for getPenaltyScore().
+		private finderPenaltyTerminateAndCount(currentRunColor: boolean, currentRunLength: int, runHistory: Array<int>): int {
+			if (currentRunColor) {  // Terminate black run
+				this.finderPenaltyAddHistory(currentRunLength, runHistory);
+				currentRunLength = 0;
+			}
+			currentRunLength += this.size;  // Add white border to final run
+			this.finderPenaltyAddHistory(currentRunLength, runHistory);
+			return this.finderPenaltyCountPatterns(runHistory);
+		}
+		
+		
+		// Pushes the given value to the front and drops the last value. A helper function for getPenaltyScore().
+		private finderPenaltyAddHistory(currentRunLength: int, runHistory: Array<int>): void {
+			if (runHistory[0] == 0)
+				currentRunLength += this.size;  // Add white border to initial run
+			runHistory.pop();
+			runHistory.unshift(currentRunLength);
 		}
 		
 		
@@ -689,6 +753,16 @@ namespace qrcodegen {
 	}
 	
 	
+	// Appends the given number of low-order bits of the given value
+	// to the given buffer. Requires 0 <= len <= 31 and 0 <= val < 2^len.
+	function appendBits(val: int, len: int, bb: Array<bit>): void {
+		if (len < 0 || len > 31 || val >>> len != 0)
+			throw "Value out of range";
+		for (let i = len - 1; i >= 0; i--)  // Append bit by bit
+			bb.push((val >>> i) & 1);
+	}
+	
+	
 	// Returns true iff the i'th bit of x is set to 1.
 	function getBit(x: int, i: int): boolean {
 		return ((x >>> i) & 1) != 0;
@@ -717,9 +791,9 @@ namespace qrcodegen {
 		// byte mode. All input byte arrays are acceptable. Any text string
 		// can be converted to UTF-8 bytes and encoded as a byte mode segment.
 		public static makeBytes(data: Array<byte>): QrSegment {
-			let bb = new BitBuffer();
+			let bb: Array<bit> = []
 			for (const b of data)
-				bb.appendBits(b, 8);
+				appendBits(b, 8, bb);
 			return new QrSegment(QrSegment.Mode.BYTE, data.length, bb);
 		}
 		
@@ -728,10 +802,10 @@ namespace qrcodegen {
 		public static makeNumeric(digits: string): QrSegment {
 			if (!this.NUMERIC_REGEX.test(digits))
 				throw "String contains non-numeric characters";
-			let bb = new BitBuffer();
+			let bb: Array<bit> = []
 			for (let i = 0; i < digits.length; ) {  // Consume up to 3 digits per iteration
 				const n: int = Math.min(digits.length - i, 3);
-				bb.appendBits(parseInt(digits.substr(i, n), 10), n * 3 + 1);
+				appendBits(parseInt(digits.substr(i, n), 10), n * 3 + 1, bb);
 				i += n;
 			}
 			return new QrSegment(QrSegment.Mode.NUMERIC, digits.length, bb);
@@ -744,15 +818,15 @@ namespace qrcodegen {
 		public static makeAlphanumeric(text: string): QrSegment {
 			if (!this.ALPHANUMERIC_REGEX.test(text))
 				throw "String contains unencodable characters in alphanumeric mode";
-			let bb = new BitBuffer();
+			let bb: Array<bit> = []
 			let i: int;
 			for (i = 0; i + 2 <= text.length; i += 2) {  // Process groups of 2
 				let temp: int = QrSegment.ALPHANUMERIC_CHARSET.indexOf(text.charAt(i)) * 45;
 				temp += QrSegment.ALPHANUMERIC_CHARSET.indexOf(text.charAt(i + 1));
-				bb.appendBits(temp, 11);
+				appendBits(temp, 11, bb);
 			}
 			if (i < text.length)  // 1 character remaining
-				bb.appendBits(QrSegment.ALPHANUMERIC_CHARSET.indexOf(text.charAt(i)), 6);
+				appendBits(QrSegment.ALPHANUMERIC_CHARSET.indexOf(text.charAt(i)), 6, bb);
 			return new QrSegment(QrSegment.Mode.ALPHANUMERIC, text.length, bb);
 		}
 		
@@ -775,17 +849,17 @@ namespace qrcodegen {
 		// Returns a segment representing an Extended Channel Interpretation
 		// (ECI) designator with the given assignment value.
 		public static makeEci(assignVal: int): QrSegment {
-			let bb = new BitBuffer();
+			let bb: Array<bit> = []
 			if (assignVal < 0)
 				throw "ECI assignment value out of range";
 			else if (assignVal < (1 << 7))
-				bb.appendBits(assignVal, 8);
+				appendBits(assignVal, 8, bb);
 			else if (assignVal < (1 << 14)) {
-				bb.appendBits(2, 2);
-				bb.appendBits(assignVal, 14);
+				appendBits(2, 2, bb);
+				appendBits(assignVal, 14, bb);
 			} else if (assignVal < 1000000) {
-				bb.appendBits(6, 3);
-				bb.appendBits(assignVal, 21);
+				appendBits(6, 3, bb);
+				appendBits(assignVal, 21, bb);
 			} else
 				throw "ECI assignment value out of range";
 			return new QrSegment(QrSegment.Mode.ECI, 0, bb);
@@ -869,103 +943,6 @@ namespace qrcodegen {
 		// The set of all legal characters in alphanumeric mode,
 		// where each character value maps to the index in the string.
 		private static readonly ALPHANUMERIC_CHARSET: string = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:";
-		
-	}
-	
-	
-	
-	/*---- Private helper classes ----*/
-	
-	/* 
-	 * Computes the Reed-Solomon error correction codewords for a sequence of data codewords
-	 * at a given degree. Objects are immutable, and the state only depends on the degree.
-	 * This class exists because each data block in a QR Code shares the same the divisor polynomial.
-	 */
-	class ReedSolomonGenerator {
-		
-		// Coefficients of the divisor polynomial, stored from highest to lowest power, excluding the leading term which
-		// is always 1. For example the polynomial x^3 + 255x^2 + 8x + 93 is stored as the uint8 array {255, 8, 93}.
-		private readonly coefficients: Array<byte> = [];
-		
-		
-		// Creates a Reed-Solomon ECC generator for the given degree. This could be implemented
-		// as a lookup table over all possible parameter values, instead of as an algorithm.
-		public constructor(degree: int) {
-			if (degree < 1 || degree > 255)
-				throw "Degree out of range";
-			let coefs = this.coefficients;
-			
-			// Start with the monomial x^0
-			for (let i = 0; i < degree - 1; i++)
-				coefs.push(0);
-			coefs.push(1);
-			
-			// Compute the product polynomial (x - r^0) * (x - r^1) * (x - r^2) * ... * (x - r^{degree-1}),
-			// drop the highest term, and store the rest of the coefficients in order of descending powers.
-			// Note that r = 0x02, which is a generator element of this field GF(2^8/0x11D).
-			let root = 1;
-			for (let i = 0; i < degree; i++) {
-				// Multiply the current product by (x - r^i)
-				for (let j = 0; j < coefs.length; j++) {
-					coefs[j] = ReedSolomonGenerator.multiply(coefs[j], root);
-					if (j + 1 < coefs.length)
-						coefs[j] ^= coefs[j + 1];
-				}
-				root = ReedSolomonGenerator.multiply(root, 0x02);
-			}
-		}
-		
-		
-		// Computes and returns the Reed-Solomon error correction codewords for the given
-		// sequence of data codewords. The returned object is always a new byte array.
-		// This method does not alter this object's state (because it is immutable).
-		public getRemainder(data: Array<byte>): Array<byte> {
-			// Compute the remainder by performing polynomial division
-			let result: Array<byte> = this.coefficients.map(_ => 0);
-			for (const b of data) {
-				const factor: byte = b ^ (result.shift() as byte);
-				result.push(0);
-				this.coefficients.forEach((coef, i) =>
-					result[i] ^= ReedSolomonGenerator.multiply(coef, factor));
-			}
-			return result;
-		}
-		
-		
-		// Returns the product of the two given field elements modulo GF(2^8/0x11D). The arguments and result
-		// are unsigned 8-bit integers. This could be implemented as a lookup table of 256*256 entries of uint8.
-		private static multiply(x: byte, y: byte): byte {
-			if (x >>> 8 != 0 || y >>> 8 != 0)
-				throw "Byte out of range";
-			// Russian peasant multiplication
-			let z: int = 0;
-			for (let i = 7; i >= 0; i--) {
-				z = (z << 1) ^ ((z >>> 7) * 0x11D);
-				z ^= ((y >>> i) & 1) * x;
-			}
-			if (z >>> 8 != 0)
-				throw "Assertion error";
-			return z as byte;
-		}
-		
-	}
-	
-	
-	
-	/* 
-	 * An appendable sequence of bits (0s and 1s). Mainly used by QrSegment.
-	 * The implicit constructor creates an empty bit buffer (length 0).
-	 */
-	class BitBuffer extends Array<bit> {
-		
-		// Appends the given number of low-order bits of the given value
-		// to this buffer. Requires 0 <= len <= 31 and 0 <= val < 2^len.
-		public appendBits(val: int, len: int): void {
-			if (len < 0 || len > 31 || val >>> len != 0)
-				throw "Value out of range";
-			for (let i = len - 1; i >= 0; i--)  // Append bit by bit
-				this.push((val >>> i) & 1);
-		}
 		
 	}
 	

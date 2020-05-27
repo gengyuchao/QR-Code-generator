@@ -23,15 +23,199 @@
 
 #pragma once
 
+#include <array>
 #include <cstdint>
-#include <deque>
 #include <stdexcept>
 #include <string>
 #include <vector>
-#include "QrSegment.hpp"
 
 
 namespace qrcodegen {
+
+/* 
+ * A segment of character/binary/control data in a QR Code symbol.
+ * Instances of this class are immutable.
+ * The mid-level way to create a segment is to take the payload data
+ * and call a static factory function such as QrSegment::makeNumeric().
+ * The low-level way to create a segment is to custom-make the bit buffer
+ * and call the QrSegment() constructor with appropriate values.
+ * This segment class imposes no length restrictions, but QR Codes have restrictions.
+ * Even in the most favorable conditions, a QR Code can only hold 7089 characters of data.
+ * Any segment longer than this is meaningless for the purpose of generating QR Codes.
+ */
+class QrSegment final {
+	
+	/*---- Public helper enumeration ----*/
+	
+	/* 
+	 * Describes how a segment's data bits are interpreted. Immutable.
+	 */
+	public: class Mode final {
+		
+		/*-- Constants --*/
+		
+		public: static const Mode NUMERIC;
+		public: static const Mode ALPHANUMERIC;
+		public: static const Mode BYTE;
+		public: static const Mode KANJI;
+		public: static const Mode ECI;
+		
+		
+		/*-- Fields --*/
+		
+		// The mode indicator bits, which is a uint4 value (range 0 to 15).
+		private: int modeBits;
+		
+		// Number of character count bits for three different version ranges.
+		private: int numBitsCharCount[3];
+		
+		
+		/*-- Constructor --*/
+		
+		private: Mode(int mode, int cc0, int cc1, int cc2);
+		
+		
+		/*-- Methods --*/
+		
+		/* 
+		 * (Package-private) Returns the mode indicator bits, which is an unsigned 4-bit value (range 0 to 15).
+		 */
+		public: int getModeBits() const;
+		
+		/* 
+		 * (Package-private) Returns the bit width of the character count field for a segment in
+		 * this mode in a QR Code at the given version number. The result is in the range [0, 16].
+		 */
+		public: int numCharCountBits(int ver) const;
+		
+	};
+	
+	
+	
+	/*---- Static factory functions (mid level) ----*/
+	
+	/* 
+	 * Returns a segment representing the given binary data encoded in
+	 * byte mode. All input byte vectors are acceptable. Any text string
+	 * can be converted to UTF-8 bytes and encoded as a byte mode segment.
+	 */
+	public: static QrSegment makeBytes(const std::vector<std::uint8_t> &data);
+	
+	
+	/* 
+	 * Returns a segment representing the given string of decimal digits encoded in numeric mode.
+	 */
+	public: static QrSegment makeNumeric(const char *digits);
+	
+	
+	/* 
+	 * Returns a segment representing the given text string encoded in alphanumeric mode.
+	 * The characters allowed are: 0 to 9, A to Z (uppercase only), space,
+	 * dollar, percent, asterisk, plus, hyphen, period, slash, colon.
+	 */
+	public: static QrSegment makeAlphanumeric(const char *text);
+	
+	
+	/* 
+	 * Returns a list of zero or more segments to represent the given text string. The result
+	 * may use various segment modes and switch modes to optimize the length of the bit stream.
+	 */
+	public: static std::vector<QrSegment> makeSegments(const char *text);
+	
+	
+	/* 
+	 * Returns a segment representing an Extended Channel Interpretation
+	 * (ECI) designator with the given assignment value.
+	 */
+	public: static QrSegment makeEci(long assignVal);
+	
+	
+	/*---- Public static helper functions ----*/
+	
+	/* 
+	 * Tests whether the given string can be encoded as a segment in alphanumeric mode.
+	 * A string is encodable iff each character is in the following set: 0 to 9, A to Z
+	 * (uppercase only), space, dollar, percent, asterisk, plus, hyphen, period, slash, colon.
+	 */
+	public: static bool isAlphanumeric(const char *text);
+	
+	
+	/* 
+	 * Tests whether the given string can be encoded as a segment in numeric mode.
+	 * A string is encodable iff each character is in the range 0 to 9.
+	 */
+	public: static bool isNumeric(const char *text);
+	
+	
+	
+	/*---- Instance fields ----*/
+	
+	/* The mode indicator of this segment. Accessed through getMode(). */
+	private: Mode mode;
+	
+	/* The length of this segment's unencoded data. Measured in characters for
+	 * numeric/alphanumeric/kanji mode, bytes for byte mode, and 0 for ECI mode.
+	 * Always zero or positive. Not the same as the data's bit length.
+	 * Accessed through getNumChars(). */
+	private: int numChars;
+	
+	/* The data bits of this segment. Accessed through getData(). */
+	private: std::vector<bool> data;
+	
+	
+	/*---- Constructors (low level) ----*/
+	
+	/* 
+	 * Creates a new QR Code segment with the given attributes and data.
+	 * The character count (numCh) must agree with the mode and the bit buffer length,
+	 * but the constraint isn't checked. The given bit buffer is copied and stored.
+	 */
+	public: QrSegment(Mode md, int numCh, const std::vector<bool> &dt);
+	
+	
+	/* 
+	 * Creates a new QR Code segment with the given parameters and data.
+	 * The character count (numCh) must agree with the mode and the bit buffer length,
+	 * but the constraint isn't checked. The given bit buffer is moved and stored.
+	 */
+	public: QrSegment(Mode md, int numCh, std::vector<bool> &&dt);
+	
+	
+	/*---- Methods ----*/
+	
+	/* 
+	 * Returns the mode field of this segment.
+	 */
+	public: Mode getMode() const;
+	
+	
+	/* 
+	 * Returns the character count field of this segment.
+	 */
+	public: int getNumChars() const;
+	
+	
+	/* 
+	 * Returns the data bits of this segment.
+	 */
+	public: const std::vector<bool> &getData() const;
+	
+	
+	// (Package-private) Calculates the number of bits needed to encode the given segments at
+	// the given version. Returns a non-negative number if successful. Otherwise returns -1 if a
+	// segment has too many characters to fit its length field, or the total bits exceeds INT_MAX.
+	public: static int getTotalBits(const std::vector<QrSegment> &segs, int version);
+	
+	
+	/*---- Private constant ----*/
+	
+	/* The set of all legal characters in alphanumeric mode, where
+	 * each character value maps to the index in the string. */
+	private: static const char *ALPHANUMERIC_CHARSET;
+	
+};
+
+
 
 /* 
  * A QR Code symbol, which is a type of two-dimension barcode.
@@ -147,7 +331,7 @@ class QrCode final {
 	 * This is a low-level API that most users should not use directly.
 	 * A mid-level API is the encodeSegments() function.
 	 */
-	public: QrCode(int ver, Ecc ecl, const std::vector<std::uint8_t> &dataCodewords, int mask);
+	public: QrCode(int ver, Ecc ecl, const std::vector<std::uint8_t> &dataCodewords, int msk);
 	
 	
 	
@@ -201,7 +385,7 @@ class QrCode final {
 	
 	// Draws two copies of the format bits (with its own error correction code)
 	// based on the given mask and this object's error correction level field.
-	private: void drawFormatBits(int mask);
+	private: void drawFormatBits(int msk);
 	
 	
 	// Draws two copies of the version bits (with its own error correction code),
@@ -245,7 +429,7 @@ class QrCode final {
 	// before masking. Due to the arithmetic of XOR, calling applyMask() with
 	// the same mask value a second time will undo the mask. A final well-formed
 	// QR Code needs exactly one (not zero, two, etc.) mask applied.
-	private: void applyMask(int mask);
+	private: void applyMask(int msk);
 	
 	
 	// Calculates and returns the penalty score based on state of this QR Code's current modules.
@@ -274,15 +458,31 @@ class QrCode final {
 	private: static int getNumDataCodewords(int ver, Ecc ecl);
 	
 	
-	// Inserts the given value to the front of the given array, which shifts over the
-	// existing values and deletes the last value. A helper function for getPenaltyScore().
-	private: static void addRunToHistory(int run, std::deque<int> &history);
+	// Returns a Reed-Solomon ECC generator polynomial for the given degree. This could be
+	// implemented as a lookup table over all possible parameter values, instead of as an algorithm.
+	private: static std::vector<std::uint8_t> reedSolomonComputeDivisor(int degree);
 	
 	
-	// Tests whether the given run history has the pattern of ratio 1:1:3:1:1 in the middle, and
-	// surrounded by at least 4 on either or both ends. A helper function for getPenaltyScore().
-	// Must only be called immediately after a run of white modules has ended.
-	private: static bool hasFinderLikePattern(const std::deque<int> &runHistory);
+	// Returns the Reed-Solomon error correction codeword for the given data and divisor polynomials.
+	private: static std::vector<std::uint8_t> reedSolomonComputeRemainder(const std::vector<std::uint8_t> &data, const std::vector<std::uint8_t> &divisor);
+	
+	
+	// Returns the product of the two given field elements modulo GF(2^8/0x11D).
+	// All inputs are valid. This could be implemented as a 256*256 lookup table.
+	private: static std::uint8_t reedSolomonMultiply(std::uint8_t x, std::uint8_t y);
+	
+	
+	// Can only be called immediately after a white run is added, and
+	// returns either 0, 1, or 2. A helper function for getPenaltyScore().
+	private: int finderPenaltyCountPatterns(const std::array<int,7> &runHistory) const;
+	
+	
+	// Must be called at the end of a line (row or column) of modules. A helper function for getPenaltyScore().
+	private: int finderPenaltyTerminateAndCount(bool currentRunColor, int currentRunLength, std::array<int,7> &runHistory) const;
+	
+	
+	// Pushes the given value to the front and drops the last value. A helper function for getPenaltyScore().
+	private: void finderPenaltyAddHistory(int currentRunLength, std::array<int,7> &runHistory) const;
 	
 	
 	// Returns true iff the i'th bit of x is set to 1.
@@ -308,51 +508,6 @@ class QrCode final {
 	private: static const std::int8_t ECC_CODEWORDS_PER_BLOCK[4][41];
 	private: static const std::int8_t NUM_ERROR_CORRECTION_BLOCKS[4][41];
 	
-	
-	
-	/*---- Private helper class ----*/
-	
-	/* 
-	 * Computes the Reed-Solomon error correction codewords for a sequence of data codewords
-	 * at a given degree. Objects are immutable, and the state only depends on the degree.
-	 * This class exists because each data block in a QR Code shares the same the divisor polynomial.
-	 */
-	private: class ReedSolomonGenerator final {
-		
-		/*-- Immutable field --*/
-		
-		// Coefficients of the divisor polynomial, stored from highest to lowest power, excluding the leading term which
-		// is always 1. For example the polynomial x^3 + 255x^2 + 8x + 93 is stored as the uint8 array {255, 8, 93}.
-		private: std::vector<std::uint8_t> coefficients;
-		
-		
-		/*-- Constructor --*/
-		
-		/* 
-		 * Creates a Reed-Solomon ECC generator for the given degree. This could be implemented
-		 * as a lookup table over all possible parameter values, instead of as an algorithm.
-		 */
-		public: explicit ReedSolomonGenerator(int degree);
-		
-		
-		/*-- Method --*/
-		
-		/* 
-		 * Computes and returns the Reed-Solomon error correction codewords for the given
-		 * sequence of data codewords. The returned object is always a new byte array.
-		 * This method does not alter this object's state (because it is immutable).
-		 */
-		public: std::vector<std::uint8_t> getRemainder(const std::vector<std::uint8_t> &data) const;
-		
-		
-		/*-- Static function --*/
-		
-		// Returns the product of the two given field elements modulo GF(2^8/0x11D).
-		// All inputs are valid. This could be implemented as a 256*256 lookup table.
-		private: static std::uint8_t multiply(std::uint8_t x, std::uint8_t y);
-		
-	};
-	
 };
 
 
@@ -373,6 +528,28 @@ class QrCode final {
 class data_too_long : public std::length_error {
 	
 	public: explicit data_too_long(const std::string &msg);
+	
+};
+
+
+
+/* 
+ * An appendable sequence of bits (0s and 1s). Mainly used by QrSegment.
+ */
+class BitBuffer final : public std::vector<bool> {
+	
+	/*---- Constructor ----*/
+	
+	// Creates an empty bit buffer (length 0).
+	public: BitBuffer();
+	
+	
+	
+	/*---- Method ----*/
+	
+	// Appends the given number of low-order bits of the given value
+	// to this buffer. Requires 0 <= len <= 31 and val < 2^len.
+	public: void appendBits(std::uint32_t val, int len);
 	
 };
 

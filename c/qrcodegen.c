@@ -58,10 +58,10 @@ testable void addEccAndInterleave(uint8_t data[], int version, enum qrcodegen_Ec
 testable int getNumDataCodewords(int version, enum qrcodegen_Ecc ecl);
 testable int getNumRawDataModules(int ver);
 
-testable void calcReedSolomonGenerator(int degree, uint8_t result[]);
-testable void calcReedSolomonRemainder(const uint8_t data[], int dataLen,
+testable void reedSolomonComputeDivisor(int degree, uint8_t result[]);
+testable void reedSolomonComputeRemainder(const uint8_t data[], int dataLen,
 	const uint8_t generator[], int degree, uint8_t result[]);
-testable uint8_t finiteFieldMultiply(uint8_t x, uint8_t y);
+testable uint8_t reedSolomonMultiply(uint8_t x, uint8_t y);
 
 testable void initializeFunctionModules(int version, uint8_t qrcode[]);
 static void drawWhiteFunctionModules(uint8_t qrcode[], int version);
@@ -72,8 +72,9 @@ static void fillRectangle(int left, int top, int width, int height, uint8_t qrco
 static void drawCodewords(const uint8_t data[], int dataLen, uint8_t qrcode[]);
 static void applyMask(const uint8_t functionModules[], uint8_t qrcode[], enum qrcodegen_Mask mask);
 static long getPenaltyScore(const uint8_t qrcode[]);
-static void addRunToHistory(unsigned char run, unsigned char history[7]);
-static bool hasFinderLikePattern(const unsigned char runHistory[7]);
+static int finderPenaltyCountPatterns(const int runHistory[7], int qrsize);
+static int finderPenaltyTerminateAndCount(bool currentRunColor, int currentRunLength, int runHistory[7], int qrsize);
+static void finderPenaltyAddHistory(int currentRunLength, int runHistory[7], int qrsize);
 
 testable bool getModule(const uint8_t qrcode[], int x, int y);
 testable void setModule(uint8_t qrcode[], int x, int y, bool isBlack);
@@ -131,7 +132,7 @@ bool qrcodegen_encodeText(const char *text, uint8_t tempBuffer[], uint8_t qrcode
 	size_t textLen = strlen(text);
 	if (textLen == 0)
 		return qrcodegen_encodeSegmentsAdvanced(NULL, 0, ecl, minVersion, maxVersion, mask, boostEcl, tempBuffer, qrcode);
-	size_t bufLen = qrcodegen_BUFFER_LEN_FOR_VERSION(maxVersion);
+	size_t bufLen = (size_t)qrcodegen_BUFFER_LEN_FOR_VERSION(maxVersion);
 	
 	struct qrcodegen_Segment seg;
 	if (qrcodegen_isNumeric(text)) {
@@ -195,13 +196,13 @@ testable void appendBitsToBuffer(unsigned int val, int numBits, uint8_t buffer[]
 bool qrcodegen_encodeSegments(const struct qrcodegen_Segment segs[], size_t len,
 		enum qrcodegen_Ecc ecl, uint8_t tempBuffer[], uint8_t qrcode[]) {
 	return qrcodegen_encodeSegmentsAdvanced(segs, len, ecl,
-		qrcodegen_VERSION_MIN, qrcodegen_VERSION_MAX, -1, true, tempBuffer, qrcode);
+		qrcodegen_VERSION_MIN, qrcodegen_VERSION_MAX, qrcodegen_Mask_AUTO, true, tempBuffer, qrcode);
 }
 
 
 // Public function - see documentation comment in header file.
 bool qrcodegen_encodeSegmentsAdvanced(const struct qrcodegen_Segment segs[], size_t len, enum qrcodegen_Ecc ecl,
-		int minVersion, int maxVersion, int mask, bool boostEcl, uint8_t tempBuffer[], uint8_t qrcode[]) {
+		int minVersion, int maxVersion, enum qrcodegen_Mask mask, bool boostEcl, uint8_t tempBuffer[], uint8_t qrcode[]) {
 	assert(segs != NULL || len == 0);
 	assert(qrcodegen_VERSION_MIN <= minVersion && minVersion <= maxVersion && maxVersion <= qrcodegen_VERSION_MAX);
 	assert(0 <= (int)ecl && (int)ecl <= 3 && -1 <= (int)mask && (int)mask <= 7);
@@ -227,14 +228,16 @@ bool qrcodegen_encodeSegmentsAdvanced(const struct qrcodegen_Segment segs[], siz
 	}
 	
 	// Concatenate all segments to create the data bit string
-	memset(qrcode, 0, qrcodegen_BUFFER_LEN_FOR_VERSION(version) * sizeof(qrcode[0]));
+	memset(qrcode, 0, (size_t)qrcodegen_BUFFER_LEN_FOR_VERSION(version) * sizeof(qrcode[0]));
 	int bitLen = 0;
 	for (size_t i = 0; i < len; i++) {
 		const struct qrcodegen_Segment *seg = &segs[i];
-		appendBitsToBuffer((int)seg->mode, 4, qrcode, &bitLen);
-		appendBitsToBuffer(seg->numChars, numCharCountBits(seg->mode, version), qrcode, &bitLen);
-		for (int j = 0; j < seg->bitLength; j++)
-			appendBitsToBuffer((seg->data[j >> 3] >> (7 - (j & 7))) & 1, 1, qrcode, &bitLen);
+		appendBitsToBuffer((unsigned int)seg->mode, 4, qrcode, &bitLen);
+		appendBitsToBuffer((unsigned int)seg->numChars, numCharCountBits(seg->mode, version), qrcode, &bitLen);
+		for (int j = 0; j < seg->bitLength; j++) {
+			int bit = (seg->data[j >> 3] >> (7 - (j & 7))) & 1;
+			appendBitsToBuffer((unsigned int)bit, 1, qrcode, &bitLen);
+		}
 	}
 	assert(bitLen == dataUsedBits);
 	
@@ -300,13 +303,13 @@ testable void addEccAndInterleave(uint8_t data[], int version, enum qrcodegen_Ec
 	
 	// Split data into blocks, calculate ECC, and interleave
 	// (not concatenate) the bytes into a single sequence
-	uint8_t generator[qrcodegen_REED_SOLOMON_DEGREE_MAX];
-	calcReedSolomonGenerator(blockEccLen, generator);
+	uint8_t rsdiv[qrcodegen_REED_SOLOMON_DEGREE_MAX];
+	reedSolomonComputeDivisor(blockEccLen, rsdiv);
 	const uint8_t *dat = data;
 	for (int i = 0; i < numBlocks; i++) {
 		int datLen = shortBlockDataLen + (i < numShortBlocks ? 0 : 1);
 		uint8_t *ecc = &data[dataLen];  // Temporary storage
-		calcReedSolomonRemainder(dat, datLen, generator, blockEccLen, ecc);
+		reedSolomonComputeRemainder(dat, datLen, rsdiv, blockEccLen, ecc);
 		for (int j = 0, k = i; j < datLen; j++, k += numBlocks) {  // Copy data
 			if (j == shortBlockDataLen)
 				k -= numShortBlocks;
@@ -342,6 +345,7 @@ testable int getNumRawDataModules(int ver) {
 		if (ver >= 7)
 			result -= 36;
 	}
+	assert(208 <= result && result <= 29648);
 	return result;
 }
 
@@ -349,43 +353,44 @@ testable int getNumRawDataModules(int ver) {
 
 /*---- Reed-Solomon ECC generator functions ----*/
 
-// Calculates the Reed-Solomon generator polynomial of the given degree, storing in result[0 : degree].
-testable void calcReedSolomonGenerator(int degree, uint8_t result[]) {
-	// Start with the monomial x^0
+// Computes a Reed-Solomon ECC generator polynomial for the given degree, storing in result[0 : degree].
+// This could be implemented as a lookup table over all possible parameter values, instead of as an algorithm.
+testable void reedSolomonComputeDivisor(int degree, uint8_t result[]) {
 	assert(1 <= degree && degree <= qrcodegen_REED_SOLOMON_DEGREE_MAX);
-	memset(result, 0, degree * sizeof(result[0]));
-	result[degree - 1] = 1;
+	// Polynomial coefficients are stored from highest to lowest power, excluding the leading term which is always 1.
+	// For example the polynomial x^3 + 255x^2 + 8x + 93 is stored as the uint8 array {255, 8, 93}.
+	memset(result, 0, (size_t)degree * sizeof(result[0]));
+	result[degree - 1] = 1;  // Start off with the monomial x^0
 	
 	// Compute the product polynomial (x - r^0) * (x - r^1) * (x - r^2) * ... * (x - r^{degree-1}),
-	// drop the highest term, and store the rest of the coefficients in order of descending powers.
+	// drop the highest monomial term which is always 1x^degree.
 	// Note that r = 0x02, which is a generator element of this field GF(2^8/0x11D).
 	uint8_t root = 1;
 	for (int i = 0; i < degree; i++) {
 		// Multiply the current product by (x - r^i)
 		for (int j = 0; j < degree; j++) {
-			result[j] = finiteFieldMultiply(result[j], root);
+			result[j] = reedSolomonMultiply(result[j], root);
 			if (j + 1 < degree)
 				result[j] ^= result[j + 1];
 		}
-		root = finiteFieldMultiply(root, 0x02);
+		root = reedSolomonMultiply(root, 0x02);
 	}
 }
 
 
-// Calculates the remainder of the polynomial data[0 : dataLen] when divided by the generator[0 : degree], where all
-// polynomials are in big endian and the generator has an implicit leading 1 term, storing the result in result[0 : degree].
-testable void calcReedSolomonRemainder(const uint8_t data[], int dataLen,
+// Computes the Reed-Solomon error correction codeword for the given data and divisor polynomials.
+// The remainder when data[0 : dataLen] is divided by divisor[0 : degree] is stored in result[0 : degree].
+// All polynomials are in big endian, and the generator has an implicit leading 1 term.
+testable void reedSolomonComputeRemainder(const uint8_t data[], int dataLen,
 		const uint8_t generator[], int degree, uint8_t result[]) {
-	
-	// Perform polynomial division
 	assert(1 <= degree && degree <= qrcodegen_REED_SOLOMON_DEGREE_MAX);
-	memset(result, 0, degree * sizeof(result[0]));
-	for (int i = 0; i < dataLen; i++) {
+	memset(result, 0, (size_t)degree * sizeof(result[0]));
+	for (int i = 0; i < dataLen; i++) {  // Polynomial division
 		uint8_t factor = data[i] ^ result[0];
-		memmove(&result[0], &result[1], (degree - 1) * sizeof(result[0]));
+		memmove(&result[0], &result[1], (size_t)(degree - 1) * sizeof(result[0]));
 		result[degree - 1] = 0;
 		for (int j = 0; j < degree; j++)
-			result[j] ^= finiteFieldMultiply(generator[j], factor);
+			result[j] ^= reedSolomonMultiply(generator[j], factor);
 	}
 }
 
@@ -394,11 +399,11 @@ testable void calcReedSolomonRemainder(const uint8_t data[], int dataLen,
 
 // Returns the product of the two given field elements modulo GF(2^8/0x11D).
 // All inputs are valid. This could be implemented as a 256*256 lookup table.
-testable uint8_t finiteFieldMultiply(uint8_t x, uint8_t y) {
+testable uint8_t reedSolomonMultiply(uint8_t x, uint8_t y) {
 	// Russian peasant multiplication
 	uint8_t z = 0;
 	for (int i = 7; i >= 0; i--) {
-		z = (z << 1) ^ ((z >> 7) * 0x11D);
+		z = (uint8_t)((z << 1) ^ ((z >> 7) * 0x11D));
 		z ^= ((y >> i) & 1) * x;
 	}
 	return z;
@@ -413,7 +418,7 @@ testable uint8_t finiteFieldMultiply(uint8_t x, uint8_t y) {
 testable void initializeFunctionModules(int version, uint8_t qrcode[]) {
 	// Initialize QR Code
 	int qrsize = version * 4 + 17;
-	memset(qrcode, 0, ((qrsize * qrsize + 7) / 8 + 1) * sizeof(qrcode[0]));
+	memset(qrcode, 0, (size_t)((qrsize * qrsize + 7) / 8 + 1) * sizeof(qrcode[0]));
 	qrcode[0] = (uint8_t)qrsize;
 	
 	// Fill horizontal and vertical timing patterns
@@ -549,7 +554,7 @@ testable int getAlignmentPatternPositions(int version, uint8_t result[7]) {
 	int step = (version == 32) ? 26 :
 		(version*4 + numAlign*2 + 1) / (numAlign*2 - 2) * 2;
 	for (int i = numAlign - 1, pos = version * 4 + 10; i >= 1; i--, pos -= step)
-		result[i] = pos;
+		result[i] = (uint8_t)pos;
 	result[0] = 6;
 	return numAlign;
 }
@@ -634,55 +639,47 @@ static long getPenaltyScore(const uint8_t qrcode[]) {
 	
 	// Adjacent modules in row having same color, and finder-like patterns
 	for (int y = 0; y < qrsize; y++) {
-		unsigned char runHistory[7] = {0};
-		bool color = false;
-		unsigned char runX = 0;
+		bool runColor = false;
+		int runX = 0;
+		int runHistory[7] = {0};
 		for (int x = 0; x < qrsize; x++) {
-			if (getModule(qrcode, x, y) == color) {
+			if (getModule(qrcode, x, y) == runColor) {
 				runX++;
 				if (runX == 5)
 					result += PENALTY_N1;
 				else if (runX > 5)
 					result++;
 			} else {
-				addRunToHistory(runX, runHistory);
-				if (!color && hasFinderLikePattern(runHistory))
-					result += PENALTY_N3;
-				color = getModule(qrcode, x, y);
+				finderPenaltyAddHistory(runX, runHistory, qrsize);
+				if (!runColor)
+					result += finderPenaltyCountPatterns(runHistory, qrsize) * PENALTY_N3;
+				runColor = getModule(qrcode, x, y);
 				runX = 1;
 			}
 		}
-		addRunToHistory(runX, runHistory);
-		if (color)
-			addRunToHistory(0, runHistory);  // Dummy run of white
-		if (hasFinderLikePattern(runHistory))
-			result += PENALTY_N3;
+		result += finderPenaltyTerminateAndCount(runColor, runX, runHistory, qrsize) * PENALTY_N3;
 	}
 	// Adjacent modules in column having same color, and finder-like patterns
 	for (int x = 0; x < qrsize; x++) {
-		unsigned char runHistory[7] = {0};
-		bool color = false;
-		unsigned char runY = 0;
+		bool runColor = false;
+		int runY = 0;
+		int runHistory[7] = {0};
 		for (int y = 0; y < qrsize; y++) {
-			if (getModule(qrcode, x, y) == color) {
+			if (getModule(qrcode, x, y) == runColor) {
 				runY++;
 				if (runY == 5)
 					result += PENALTY_N1;
 				else if (runY > 5)
 					result++;
 			} else {
-				addRunToHistory(runY, runHistory);
-				if (!color && hasFinderLikePattern(runHistory))
-					result += PENALTY_N3;
-				color = getModule(qrcode, x, y);
+				finderPenaltyAddHistory(runY, runHistory, qrsize);
+				if (!runColor)
+					result += finderPenaltyCountPatterns(runHistory, qrsize) * PENALTY_N3;
+				runColor = getModule(qrcode, x, y);
 				runY = 1;
 			}
 		}
-		addRunToHistory(runY, runHistory);
-		if (color)
-			addRunToHistory(0, runHistory);  // Dummy run of white
-		if (hasFinderLikePattern(runHistory))
-			result += PENALTY_N3;
+		result += finderPenaltyTerminateAndCount(runColor, runY, runHistory, qrsize) * PENALTY_N3;
 	}
 	
 	// 2*2 blocks of modules having same color
@@ -712,23 +709,37 @@ static long getPenaltyScore(const uint8_t qrcode[]) {
 }
 
 
-// Inserts the given value to the front of the given array, which shifts over the
-// existing values and deletes the last value. A helper function for getPenaltyScore().
-static void addRunToHistory(unsigned char run, unsigned char history[7]) {
-	memmove(&history[1], &history[0], 6 * sizeof(history[0]));
-	history[0] = run;
+// Can only be called immediately after a white run is added, and
+// returns either 0, 1, or 2. A helper function for getPenaltyScore().
+static int finderPenaltyCountPatterns(const int runHistory[7], int qrsize) {
+	int n = runHistory[1];
+	assert(n <= qrsize * 3);
+	bool core = n > 0 && runHistory[2] == n && runHistory[3] == n * 3 && runHistory[4] == n && runHistory[5] == n;
+	// The maximum QR Code size is 177, hence the black run length n <= 177.
+	// Arithmetic is promoted to int, so n*4 will not overflow.
+	return (core && runHistory[0] >= n * 4 && runHistory[6] >= n ? 1 : 0)
+	     + (core && runHistory[6] >= n * 4 && runHistory[0] >= n ? 1 : 0);
 }
 
 
-// Tests whether the given run history has the pattern of ratio 1:1:3:1:1 in the middle, and
-// surrounded by at least 4 on either or both ends. A helper function for getPenaltyScore().
-// Must only be called immediately after a run of white modules has ended.
-static bool hasFinderLikePattern(const unsigned char runHistory[7]) {
-	unsigned char n = runHistory[1];
-	// The maximum QR Code size is 177, hence the run length n <= 177.
-	// Arithmetic is promoted to int, so n*4 will not overflow.
-	return n > 0 && runHistory[2] == n && runHistory[4] == n && runHistory[5] == n
-		&& runHistory[3] == n * 3 && (runHistory[0] >= n * 4 || runHistory[6] >= n * 4);
+// Must be called at the end of a line (row or column) of modules. A helper function for getPenaltyScore().
+static int finderPenaltyTerminateAndCount(bool currentRunColor, int currentRunLength, int runHistory[7], int qrsize) {
+	if (currentRunColor) {  // Terminate black run
+		finderPenaltyAddHistory(currentRunLength, runHistory, qrsize);
+		currentRunLength = 0;
+	}
+	currentRunLength += qrsize;  // Add white border to final run
+	finderPenaltyAddHistory(currentRunLength, runHistory, qrsize);
+	return finderPenaltyCountPatterns(runHistory, qrsize);
+}
+
+
+// Pushes the given value to the front and drops the last value. A helper function for getPenaltyScore().
+static void finderPenaltyAddHistory(int currentRunLength, int runHistory[7], int qrsize) {
+	if (runHistory[0] == 0)
+		currentRunLength += qrsize;  // Add white border to initial run
+	memmove(&runHistory[1], &runHistory[0], 6 * sizeof(runHistory[0]));
+	runHistory[0] = currentRunLength;
 }
 
 
@@ -853,7 +864,7 @@ testable int calcSegmentBitLength(enum qrcodegen_Mode mode, size_t numChars) {
 		return -1;
 	}
 	assert(result >= 0);
-	if (result > (unsigned int)INT16_MAX)
+	if (result > INT16_MAX)
 		return -1;
 	return (int)result;
 }
@@ -952,16 +963,16 @@ struct qrcodegen_Segment qrcodegen_makeEci(long assignVal, uint8_t buf[]) {
 		assert(false);
 	else if (assignVal < (1 << 7)) {
 		memset(buf, 0, 1 * sizeof(buf[0]));
-		appendBitsToBuffer(assignVal, 8, buf, &result.bitLength);
+		appendBitsToBuffer((unsigned int)assignVal, 8, buf, &result.bitLength);
 	} else if (assignVal < (1 << 14)) {
 		memset(buf, 0, 2 * sizeof(buf[0]));
 		appendBitsToBuffer(2, 2, buf, &result.bitLength);
-		appendBitsToBuffer(assignVal, 14, buf, &result.bitLength);
+		appendBitsToBuffer((unsigned int)assignVal, 14, buf, &result.bitLength);
 	} else if (assignVal < 1000000L) {
 		memset(buf, 0, 3 * sizeof(buf[0]));
 		appendBitsToBuffer(6, 3, buf, &result.bitLength);
-		appendBitsToBuffer(assignVal >> 10, 11, buf, &result.bitLength);
-		appendBitsToBuffer(assignVal & 0x3FF, 10, buf, &result.bitLength);
+		appendBitsToBuffer((unsigned int)(assignVal >> 10), 11, buf, &result.bitLength);
+		appendBitsToBuffer((unsigned int)(assignVal & 0x3FF), 10, buf, &result.bitLength);
 	} else
 		assert(false);
 	result.data = buf;

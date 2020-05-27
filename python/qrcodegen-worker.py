@@ -1,5 +1,5 @@
 # 
-# QR Code generator test worker (Python 2, 3)
+# QR Code generator test worker (Python)
 # 
 # This program reads data and encoding parameters from standard input and writes
 # QR Code bitmaps to standard output. The I/O format is one integer per line.
@@ -26,24 +26,22 @@
 #   Software.
 # 
 
-from __future__ import print_function
 import sys
 import qrcodegen
-py3 = sys.version_info.major >= 3
 
 
-def read_int():
-	return int((input if py3 else raw_input)())
+def read_int() -> int:
+	return int(input())
 
 
-def main():
+def main() -> None:
 	while True:
 		
 		# Read data or exit
 		length = read_int()
 		if length == -1:
 			break
-		data = [read_int() for _ in range(length)]
+		data = bytearray(read_int() for _ in range(length))
 		
 		# Read encoding parameters
 		errcorlvl  = read_int()
@@ -54,11 +52,9 @@ def main():
 		
 		# Make segments for encoding
 		if all((b < 128) for b in data):  # Is ASCII
-			segs = qrcodegen.QrSegment.make_segments("".join(chr(b) for b in data))
-		elif py3:
-			segs = [qrcodegen.QrSegment.make_bytes(bytes(data))]
+			segs = qrcodegen.QrSegment.make_segments(data.decode("ASCII"))
 		else:
-			segs = [qrcodegen.QrSegment.make_bytes("".join(chr(b) for b in data))]
+			segs = [qrcodegen.QrSegment.make_bytes(data)]
 		
 		try:  # Try to make QR Code symbol
 			qr = qrcodegen.QrCode.encode_segments(segs, ECC_LEVELS[errcorlvl], minversion, maxversion, mask, boostecl != 0)

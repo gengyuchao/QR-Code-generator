@@ -1,5 +1,5 @@
 # 
-# QR Code generator batch test (Python 3)
+# QR Code generator batch test (Python)
 # 
 # Runs various versions of the QR Code generator test worker as subprocesses,
 # feeds each one the same random input, and compares their output for equality.
@@ -25,23 +25,22 @@
 # 
 
 import itertools, random, subprocess, sys, time
-if sys.version_info.major < 3:
-	raise RuntimeError("Requires Python 3+")
+from typing import List, Optional, TypeVar
 
 
-CHILD_PROGRAMS = [
-	["python2", "../python/qrcodegen-worker.py"],  # Python 2 program
-	["python3", "../python/qrcodegen-worker.py"],  # Python 3 program
-	["java", "-cp", "../java", "-ea:io.nayuki.qrcodegen...", "io/nayuki/qrcodegen/QrCodeGeneratorWorker"],  # Java program
+CHILD_PROGRAMS: List[List[str]] = [
+	["python3", "-B", "../python/qrcodegen-worker.py"],  # Python program
+	["java", "-cp", "../java/src/main/java", "-ea:io.nayuki.qrcodegen...", "io/nayuki/qrcodegen/QrCodeGeneratorWorker"],  # Java program
+	["node", "../typescript-javascript/qrcodegen-worker.js"],  # TypeScript program
 	["../c/qrcodegen-worker"],  # C program
 	["../cpp/QrCodeGeneratorWorker"],  # C++ program
 	["../rust/target/debug/examples/qrcodegen-worker"],  # Rust program
 ]
 
 
-subprocs = []
+subprocs: List[subprocess.Popen] = []
 
-def main():
+def main() -> None:
 	# Launch workers
 	global subprocs
 	try:
@@ -58,7 +57,7 @@ def main():
 		for proc in subprocs:
 			if proc.poll() is None:
 				print(-1, file=proc.stdin)
-				proc.stdin.flush()
+				not_none(proc.stdin).flush()
 		sys.exit("Error: One or more workers failed to start")
 	
 	# Do tests
@@ -68,14 +67,14 @@ def main():
 		print()
 
 
-def do_trial():
+def do_trial() -> None:
 	mode = random.randrange(4)
 	if mode == 0:  # Numeric
 		length = round((2 * 7089) ** random.random())
-		data = [random.randrange(48, 58) for _ in range(length)]
+		data = random.choices(b"0123456789", k=length)
 	elif mode == 1:  # Alphanumeric
 		length = round((2 * 4296) ** random.random())
-		data = [ord(random.choice("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:")) for _ in range(length)]
+		data = random.choices(b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:", k=length)
 	elif mode == 2:  # ASCII
 		length = round((2 * 2953) ** random.random())
 		data = [random.randrange(128) for _ in range(length)]
@@ -116,20 +115,27 @@ def do_trial():
 		read_verify()
 
 
-def write_all(val):
+def write_all(val: int) -> None:
 	for proc in subprocs:
 		print(val, file=proc.stdin)
 
-def flush_all():
+def flush_all() -> None:
 	for proc in subprocs:
-		proc.stdin.flush()
+		not_none(proc.stdin).flush()
 
-def read_verify():
-	val = subprocs[0].stdout.readline().rstrip("\r\n")
+def read_verify() -> int:
+	val = not_none(subprocs[0].stdout).readline().rstrip("\r\n")
 	for proc in subprocs[1 : ]:
-		if proc.stdout.readline().rstrip("\r\n") != val:
+		if not_none(proc.stdout).readline().rstrip("\r\n") != val:
 			raise ValueError("Mismatch")
 	return int(val)
+
+
+T = TypeVar("T")
+def not_none(obj: Optional[T]) -> T:
+	if obj is None:
+		raise TypeError()
+	return obj
 
 
 if __name__ == "__main__":

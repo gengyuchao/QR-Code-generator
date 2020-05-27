@@ -241,16 +241,16 @@ public final class QrCode {
 	 * @param ver the version number to use, which must be in the range 1 to 40 (inclusive)
 	 * @param ecl the error correction level to use
 	 * @param dataCodewords the bytes representing segments to encode (without ECC)
-	 * @param mask the mask pattern to use, which is either &#x2212;1 for automatic choice or from 0 to 7 for fixed choice
+	 * @param msk the mask pattern to use, which is either &#x2212;1 for automatic choice or from 0 to 7 for fixed choice
 	 * @throws NullPointerException if the byte array or error correction level is {@code null}
 	 * @throws IllegalArgumentException if the version or mask value is out of range,
 	 * or if the data is the wrong length for the specified version and error correction level
 	 */
-	public QrCode(int ver, Ecc ecl, byte[] dataCodewords, int mask) {
+	public QrCode(int ver, Ecc ecl, byte[] dataCodewords, int msk) {
 		// Check arguments and initialize fields
 		if (ver < MIN_VERSION || ver > MAX_VERSION)
 			throw new IllegalArgumentException("Version value out of range");
-		if (mask < -1 || mask > 7)
+		if (msk < -1 || msk > 7)
 			throw new IllegalArgumentException("Mask value out of range");
 		version = ver;
 		size = ver * 4 + 17;
@@ -263,7 +263,7 @@ public final class QrCode {
 		drawFunctionPatterns();
 		byte[] allCodewords = addEccAndInterleave(dataCodewords);
 		drawCodewords(allCodewords);
-		this.mask = handleConstructorMasking(mask);
+		this.mask = handleConstructorMasking(msk);
 		isFunction = null;
 	}
 	
@@ -382,9 +382,9 @@ public final class QrCode {
 	
 	// Draws two copies of the format bits (with its own error correction code)
 	// based on the given mask and this object's error correction level field.
-	private void drawFormatBits(int mask) {
+	private void drawFormatBits(int msk) {
 		// Calculate error correction code and pack bits
-		int data = errorCorrectionLevel.formatBits << 3 | mask;  // errCorrLvl is uint2, mask is uint3
+		int data = errorCorrectionLevel.formatBits << 3 | msk;  // errCorrLvl is uint2, mask is uint3
 		int rem = data;
 		for (int i = 0; i < 10; i++)
 			rem = (rem << 1) ^ ((rem >>> 9) * 0x537);
@@ -483,12 +483,12 @@ public final class QrCode {
 		
 		// Split data into blocks and append ECC to each block
 		byte[][] blocks = new byte[numBlocks][];
-		ReedSolomonGenerator rs = new ReedSolomonGenerator(blockEccLen);
+		byte[] rsDiv = reedSolomonComputeDivisor(blockEccLen);
 		for (int i = 0, k = 0; i < numBlocks; i++) {
 			byte[] dat = Arrays.copyOfRange(data, k, k + shortBlockLen - blockEccLen + (i < numShortBlocks ? 0 : 1));
 			k += dat.length;
 			byte[] block = Arrays.copyOf(dat, shortBlockLen + 1);
-			byte[] ecc = rs.getRemainder(dat);
+			byte[] ecc = reedSolomonComputeRemainder(dat, rsDiv);
 			System.arraycopy(ecc, 0, block, block.length - blockEccLen, ecc.length);
 			blocks[i] = block;
 		}
@@ -543,13 +543,13 @@ public final class QrCode {
 	// before masking. Due to the arithmetic of XOR, calling applyMask() with
 	// the same mask value a second time will undo the mask. A final well-formed
 	// QR Code needs exactly one (not zero, two, etc.) mask applied.
-	private void applyMask(int mask) {
-		if (mask < 0 || mask > 7)
+	private void applyMask(int msk) {
+		if (msk < 0 || msk > 7)
 			throw new IllegalArgumentException("Mask value out of range");
 		for (int y = 0; y < size; y++) {
 			for (int x = 0; x < size; x++) {
 				boolean invert;
-				switch (mask) {
+				switch (msk) {
 					case 0:  invert = (x + y) % 2 == 0;                    break;
 					case 1:  invert = y % 2 == 0;                          break;
 					case 2:  invert = x % 3 == 0;                          break;
@@ -569,24 +569,24 @@ public final class QrCode {
 	// A messy helper function for the constructor. This QR Code must be in an unmasked state when this
 	// method is called. The given argument is the requested mask, which is -1 for auto or 0 to 7 for fixed.
 	// This method applies and returns the actual mask chosen, from 0 to 7.
-	private int handleConstructorMasking(int mask) {
-		if (mask == -1) {  // Automatically choose best mask
+	private int handleConstructorMasking(int msk) {
+		if (msk == -1) {  // Automatically choose best mask
 			int minPenalty = Integer.MAX_VALUE;
 			for (int i = 0; i < 8; i++) {
 				applyMask(i);
 				drawFormatBits(i);
 				int penalty = getPenaltyScore();
 				if (penalty < minPenalty) {
-					mask = i;
+					msk = i;
 					minPenalty = penalty;
 				}
 				applyMask(i);  // Undoes the mask due to XOR
 			}
 		}
-		assert 0 <= mask && mask <= 7;
-		applyMask(mask);  // Apply the final choice of mask
-		drawFormatBits(mask);  // Overwrite old format bits
-		return mask;  // The caller shall assign this value to the final-declared field
+		assert 0 <= msk && msk <= 7;
+		applyMask(msk);  // Apply the final choice of mask
+		drawFormatBits(msk);  // Overwrite old format bits
+		return msk;  // The caller shall assign this value to the final-declared field
 	}
 	
 	
@@ -597,55 +597,47 @@ public final class QrCode {
 		
 		// Adjacent modules in row having same color, and finder-like patterns
 		for (int y = 0; y < size; y++) {
-			int[] runHistory = new int[7];
-			boolean color = false;
+			boolean runColor = false;
 			int runX = 0;
+			int[] runHistory = new int[7];
 			for (int x = 0; x < size; x++) {
-				if (modules[y][x] == color) {
+				if (modules[y][x] == runColor) {
 					runX++;
 					if (runX == 5)
 						result += PENALTY_N1;
 					else if (runX > 5)
 						result++;
 				} else {
-					addRunToHistory(runX, runHistory);
-					if (!color && hasFinderLikePattern(runHistory))
-						result += PENALTY_N3;
-					color = modules[y][x];
+					finderPenaltyAddHistory(runX, runHistory);
+					if (!runColor)
+						result += finderPenaltyCountPatterns(runHistory) * PENALTY_N3;
+					runColor = modules[y][x];
 					runX = 1;
 				}
 			}
-			addRunToHistory(runX, runHistory);
-			if (color)
-				addRunToHistory(0, runHistory);  // Dummy run of white
-			if (hasFinderLikePattern(runHistory))
-				result += PENALTY_N3;
+			result += finderPenaltyTerminateAndCount(runColor, runX, runHistory) * PENALTY_N3;
 		}
 		// Adjacent modules in column having same color, and finder-like patterns
 		for (int x = 0; x < size; x++) {
-			int[] runHistory = new int[7];
-			boolean color = false;
+			boolean runColor = false;
 			int runY = 0;
+			int[] runHistory = new int[7];
 			for (int y = 0; y < size; y++) {
-				if (modules[y][x] == color) {
+				if (modules[y][x] == runColor) {
 					runY++;
 					if (runY == 5)
 						result += PENALTY_N1;
 					else if (runY > 5)
 						result++;
 				} else {
-					addRunToHistory(runY, runHistory);
-					if (!color && hasFinderLikePattern(runHistory))
-						result += PENALTY_N3;
-					color = modules[y][x];
+					finderPenaltyAddHistory(runY, runHistory);
+					if (!runColor)
+						result += finderPenaltyCountPatterns(runHistory) * PENALTY_N3;
+					runColor = modules[y][x];
 					runY = 1;
 				}
 			}
-			addRunToHistory(runY, runHistory);
-			if (color)
-				addRunToHistory(0, runHistory);  // Dummy run of white
-			if (hasFinderLikePattern(runHistory))
-				result += PENALTY_N3;
+			result += finderPenaltyTerminateAndCount(runColor, runY, runHistory) * PENALTY_N3;
 		}
 		
 		// 2*2 blocks of modules having same color
@@ -721,7 +713,66 @@ public final class QrCode {
 			if (ver >= 7)
 				result -= 6 * 3 * 2;  // Subtract version information
 		}
+		assert 208 <= result && result <= 29648;
 		return result;
+	}
+	
+	
+	// Returns a Reed-Solomon ECC generator polynomial for the given degree. This could be
+	// implemented as a lookup table over all possible parameter values, instead of as an algorithm.
+	private static byte[] reedSolomonComputeDivisor(int degree) {
+		if (degree < 1 || degree > 255)
+			throw new IllegalArgumentException("Degree out of range");
+		// Polynomial coefficients are stored from highest to lowest power, excluding the leading term which is always 1.
+		// For example the polynomial x^3 + 255x^2 + 8x + 93 is stored as the uint8 array {255, 8, 93}.
+		byte[] result = new byte[degree];
+		result[degree - 1] = 1;  // Start off with the monomial x^0
+		
+		// Compute the product polynomial (x - r^0) * (x - r^1) * (x - r^2) * ... * (x - r^{degree-1}),
+		// and drop the highest monomial term which is always 1x^degree.
+		// Note that r = 0x02, which is a generator element of this field GF(2^8/0x11D).
+		int root = 1;
+		for (int i = 0; i < degree; i++) {
+			// Multiply the current product by (x - r^i)
+			for (int j = 0; j < result.length; j++) {
+				result[j] = (byte)reedSolomonMultiply(result[j] & 0xFF, root);
+				if (j + 1 < result.length)
+					result[j] ^= result[j + 1];
+			}
+			root = reedSolomonMultiply(root, 0x02);
+		}
+		return result;
+	}
+	
+	
+	// Returns the Reed-Solomon error correction codeword for the given data and divisor polynomials.
+	private static byte[] reedSolomonComputeRemainder(byte[] data, byte[] divisor) {
+		Objects.requireNonNull(data);
+		Objects.requireNonNull(divisor);
+		byte[] result = new byte[divisor.length];
+		for (byte b : data) {  // Polynomial division
+			int factor = (b ^ result[0]) & 0xFF;
+			System.arraycopy(result, 1, result, 0, result.length - 1);
+			result[result.length - 1] = 0;
+			for (int i = 0; i < result.length; i++)
+				result[i] ^= reedSolomonMultiply(divisor[i] & 0xFF, factor);
+		}
+		return result;
+	}
+	
+	
+	// Returns the product of the two given field elements modulo GF(2^8/0x11D). The arguments and result
+	// are unsigned 8-bit integers. This could be implemented as a lookup table of 256*256 entries of uint8.
+	private static int reedSolomonMultiply(int x, int y) {
+		assert x >> 8 == 0 && y >> 8 == 0;
+		// Russian peasant multiplication
+		int z = 0;
+		for (int i = 7; i >= 0; i--) {
+			z = (z << 1) ^ ((z >>> 7) * 0x11D);
+			z ^= ((y >>> i) & 1) * x;
+		}
+		assert z >>> 8 == 0;
+		return z;
 	}
 	
 	
@@ -735,21 +786,35 @@ public final class QrCode {
 	}
 	
 	
-	// Inserts the given value to the front of the given array, which shifts over the
-	// existing values and deletes the last value. A helper function for getPenaltyScore().
-	private static void addRunToHistory(int run, int[] history) {
-		System.arraycopy(history, 0, history, 1, history.length - 1);
-		history[0] = run;
+	// Can only be called immediately after a white run is added, and
+	// returns either 0, 1, or 2. A helper function for getPenaltyScore().
+	private int finderPenaltyCountPatterns(int[] runHistory) {
+		int n = runHistory[1];
+		assert n <= size * 3;
+		boolean core = n > 0 && runHistory[2] == n && runHistory[3] == n * 3 && runHistory[4] == n && runHistory[5] == n;
+		return (core && runHistory[0] >= n * 4 && runHistory[6] >= n ? 1 : 0)
+		     + (core && runHistory[6] >= n * 4 && runHistory[0] >= n ? 1 : 0);
 	}
 	
 	
-	// Tests whether the given run history has the pattern of ratio 1:1:3:1:1 in the middle, and
-	// surrounded by at least 4 on either or both ends. A helper function for getPenaltyScore().
-	// Must only be called immediately after a run of white modules has ended.
-	private static boolean hasFinderLikePattern(int[] runHistory) {
-		int n = runHistory[1];
-		return n > 0 && runHistory[2] == n && runHistory[4] == n && runHistory[5] == n
-			&& runHistory[3] == n * 3 && Math.max(runHistory[0], runHistory[6]) >= n * 4;
+	// Must be called at the end of a line (row or column) of modules. A helper function for getPenaltyScore().
+	private int finderPenaltyTerminateAndCount(boolean currentRunColor, int currentRunLength, int[] runHistory) {
+		if (currentRunColor) {  // Terminate black run
+			finderPenaltyAddHistory(currentRunLength, runHistory);
+			currentRunLength = 0;
+		}
+		currentRunLength += size;  // Add white border to final run
+		finderPenaltyAddHistory(currentRunLength, runHistory);
+		return finderPenaltyCountPatterns(runHistory);
+	}
+	
+	
+	// Pushes the given value to the front and drops the last value. A helper function for getPenaltyScore().
+	private void finderPenaltyAddHistory(int currentRunLength, int[] runHistory) {
+		if (runHistory[0] == 0)
+			currentRunLength += size;  // Add white border to initial run
+		System.arraycopy(runHistory, 0, runHistory, 1, runHistory.length - 1);
+		runHistory[0] = currentRunLength;
 	}
 	
 	
@@ -815,100 +880,6 @@ public final class QrCode {
 		private Ecc(int fb) {
 			formatBits = fb;
 		}
-	}
-	
-	
-	
-	/*---- Private helper class ----*/
-	
-	/**
-	 * Computes the Reed-Solomon error correction codewords for a sequence of data codewords
-	 * at a given degree. Objects are immutable, and the state only depends on the degree.
-	 * This class exists because each data block in a QR Code shares the same the divisor polynomial.
-	 */
-	private static final class ReedSolomonGenerator {
-		
-		/*-- Field --*/
-		
-		// Coefficients of the divisor polynomial, stored from highest to lowest power, excluding the leading term which
-		// is always 1. For example the polynomial x^3 + 255x^2 + 8x + 93 is stored as the uint8 array {255, 8, 93}.
-		private final byte[] coefficients;
-		
-		
-		/*-- Constructor --*/
-		
-		/**
-		 * Constructs a Reed-Solomon ECC generator for the specified degree. This could be implemented
-		 * as a lookup table over all possible parameter values, instead of as an algorithm.
-		 * @param degree the divisor polynomial degree, which must be between 1 and 255 (inclusive)
-		 * @throws IllegalArgumentException if degree &lt; 1 or degree > 255
-		 */
-		public ReedSolomonGenerator(int degree) {
-			if (degree < 1 || degree > 255)
-				throw new IllegalArgumentException("Degree out of range");
-			
-			// Start with the monomial x^0
-			coefficients = new byte[degree];
-			coefficients[degree - 1] = 1;
-			
-			// Compute the product polynomial (x - r^0) * (x - r^1) * (x - r^2) * ... * (x - r^{degree-1}),
-			// drop the highest term, and store the rest of the coefficients in order of descending powers.
-			// Note that r = 0x02, which is a generator element of this field GF(2^8/0x11D).
-			int root = 1;
-			for (int i = 0; i < degree; i++) {
-				// Multiply the current product by (x - r^i)
-				for (int j = 0; j < coefficients.length; j++) {
-					coefficients[j] = (byte)multiply(coefficients[j] & 0xFF, root);
-					if (j + 1 < coefficients.length)
-						coefficients[j] ^= coefficients[j + 1];
-				}
-				root = multiply(root, 0x02);
-			}
-		}
-		
-		
-		/*-- Method --*/
-		
-		/**
-		 * Computes and returns the Reed-Solomon error correction codewords for the specified
-		 * sequence of data codewords. The returned object is always a new byte array.
-		 * This method does not alter this object's state (because it is immutable).
-		 * @param data the sequence of data codewords
-		 * @return the Reed-Solomon error correction codewords
-		 * @throws NullPointerException if the data is {@code null}
-		 */
-		public byte[] getRemainder(byte[] data) {
-			Objects.requireNonNull(data);
-			
-			// Compute the remainder by performing polynomial division
-			byte[] result = new byte[coefficients.length];
-			for (byte b : data) {
-				int factor = (b ^ result[0]) & 0xFF;
-				System.arraycopy(result, 1, result, 0, result.length - 1);
-				result[result.length - 1] = 0;
-				for (int i = 0; i < result.length; i++)
-					result[i] ^= multiply(coefficients[i] & 0xFF, factor);
-			}
-			return result;
-		}
-		
-		
-		/*-- Static function --*/
-		
-		// Returns the product of the two given field elements modulo GF(2^8/0x11D). The arguments and result
-		// are unsigned 8-bit integers. This could be implemented as a lookup table of 256*256 entries of uint8.
-		private static int multiply(int x, int y) {
-			assert x >>> 8 == 0 && y >>> 8 == 0;
-			// Russian peasant multiplication
-			int z = 0;
-			for (int i = 7; i >= 0; i--) {
-				z = (z << 1) ^ ((z >>> 7) * 0x11D);
-				z ^= ((y >>> i) & 1) * x;
-			}
-			assert z >>> 8 == 0;
-			return z;
-		}
-		
 	}
 	
 }
